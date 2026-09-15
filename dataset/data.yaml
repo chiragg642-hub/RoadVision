@@ -1,0 +1,9 @@
+path: C:/Users/VICTUS/OneDrive/Documents/RoadVision/dataset
+train: images/train
+val: images/val
+
+names:
+  0: longitudinal_crack
+  1: transverse_crack
+  2: alligator_crack
+  3: pothole
