@@ -5,6 +5,9 @@
 dataset/images/
 dataset/labels/
 
+foreign_data/
+selected_foreign_data/
+
 # Model weights
 models/*.pt
 
