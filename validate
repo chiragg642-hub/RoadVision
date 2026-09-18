@@ -1,0 +1,535 @@
+from pathlib import Path
+import shutil
+import csv
+import random
+
+# ============================================================
+# PATHS
+# ============================================================
+
+BASE = Path(r"C:\Users\VICTUS\OneDrive\Documents\RoadVision")
+
+FOREIGN_DATA = BASE / "foreign_data"
+
+TRAIN_IMAGES = BASE / "dataset" / "images" / "train"
+TRAIN_LABELS = BASE / "dataset" / "labels" / "train"
+
+MANIFEST = BASE / "selected_foreign_data" / "selection_manifest.csv"
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+TRANSVERSE_CLASS_ID = "1"
+
+COUNTRIES = [
+    "Czech",
+    "Japan",
+    "Norway",
+    "United_States",
+]
+
+# Total number of NEW transverse images to add
+TOTAL_TO_ADD = 800
+
+# Desired initial allocation per country
+TARGET_PER_COUNTRY = 200
+
+RANDOM_SEED = 42
+
+# Run TRUE first to preview.
+DRY_RUN = False
+
+
+# ============================================================
+# FUNCTIONS
+# ============================================================
+
+def get_stem(filename):
+    return Path(filename).stem.lower()
+
+
+def count_transverse_instances(label_file):
+    count = 0
+
+    with open(label_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+
+            if parts and parts[0] == TRANSVERSE_CLASS_ID:
+                count += 1
+
+    return count
+
+
+def get_existing_training_images():
+
+    existing = set()
+
+    for image in TRAIN_IMAGES.iterdir():
+
+        if image.is_file():
+            existing.add(get_stem(image.name))
+
+    return existing
+
+
+def get_manifest_images():
+
+    existing = set()
+
+    if not MANIFEST.exists():
+        return existing
+
+    with open(
+        MANIFEST,
+        "r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            # The original filename is what matters.
+            original = row.get("original_image")
+
+            if original:
+                existing.add(
+                    get_stem(original)
+                )
+
+    return existing
+
+
+# ============================================================
+# START
+# ============================================================
+
+print("=" * 70)
+print("RoadVision - Add Foreign Transverse Crack Images")
+print("=" * 70)
+
+TRAIN_IMAGES.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+TRAIN_LABELS.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+random.seed(RANDOM_SEED)
+
+
+# ============================================================
+# FIND ALREADY USED IMAGES
+# ============================================================
+
+dataset_existing = get_existing_training_images()
+
+manifest_existing = get_manifest_images()
+
+already_used = (
+    dataset_existing |
+    manifest_existing
+)
+
+print()
+print(
+    f"Existing training images : "
+    f"{len(dataset_existing)}"
+)
+
+print(
+    f"Images in CSV            : "
+    f"{len(manifest_existing)}"
+)
+
+print(
+    f"Images already known     : "
+    f"{len(already_used)}"
+)
+
+
+# ============================================================
+# FIND TRANSVERSE CANDIDATES
+# ============================================================
+
+candidates_by_country = {}
+
+print("\nScanning foreign_data...\n")
+
+for country in COUNTRIES:
+
+    image_dir = (
+        FOREIGN_DATA /
+        country /
+        "images"
+    )
+
+    label_dir = (
+        FOREIGN_DATA /
+        country /
+        "labels"
+    )
+
+    candidates = []
+
+    for image_file in image_dir.iterdir():
+
+        if not image_file.is_file():
+            continue
+
+        if image_file.suffix.lower() not in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".bmp",
+            ".webp"
+        }:
+            continue
+
+        label_file = (
+            label_dir /
+            f"{image_file.stem}.txt"
+        )
+
+        if not label_file.exists():
+            continue
+
+        # Only transverse-crack images
+        transverse_instances = (
+            count_transverse_instances(
+                label_file
+            )
+        )
+
+        if transverse_instances == 0:
+            continue
+
+        # Already added previously?
+        if get_stem(image_file.name) in already_used:
+            continue
+
+        # Physical file already exists?
+        if (
+            image_file.name
+            and
+            (
+                TRAIN_IMAGES /
+                image_file.name
+            ).exists()
+        ):
+            continue
+
+        candidates.append({
+            "country": country,
+            "image": image_file,
+            "label": label_file,
+            "instances": transverse_instances,
+        })
+
+    candidates_by_country[country] = candidates
+
+    print(
+        f"{country:15} : "
+        f"{len(candidates):5} new candidates"
+    )
+
+
+# ============================================================
+# CALCULATE BALANCED COUNTRY QUOTAS
+# ============================================================
+
+quotas = {}
+
+for country in COUNTRIES:
+
+    available = len(
+        candidates_by_country[country]
+    )
+
+    quotas[country] = min(
+        TARGET_PER_COUNTRY,
+        available
+    )
+
+
+# Redistribute unused slots
+remaining = (
+    TOTAL_TO_ADD -
+    sum(quotas.values())
+)
+
+while remaining > 0:
+
+    possible = [
+        country
+        for country in COUNTRIES
+        if quotas[country]
+        < len(
+            candidates_by_country[country]
+        )
+    ]
+
+    if not possible:
+        break
+
+    # Give next slot to the country
+    # with the smallest current quota.
+    possible.sort(
+        key=lambda c: quotas[c]
+    )
+
+    quotas[possible[0]] += 1
+
+    remaining -= 1
+
+
+# ============================================================
+# SELECT
+# ============================================================
+
+selected = []
+
+print("\nCountry allocation:\n")
+
+for country in COUNTRIES:
+
+    candidates = candidates_by_country[country]
+
+    random.shuffle(candidates)
+
+    # Prioritize images containing more transverse instances
+    candidates.sort(
+        key=lambda x: x["instances"],
+        reverse=True
+    )
+
+    chosen = candidates[
+        :quotas[country]
+    ]
+
+    selected.extend(chosen)
+
+    instance_count = sum(
+        x["instances"]
+        for x in chosen
+    )
+
+    print(
+        f"{country:15} : "
+        f"{len(chosen):4} images | "
+        f"{instance_count:5} transverse instances"
+    )
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+print("\n" + "=" * 70)
+print("SELECTION SUMMARY")
+print("=" * 70)
+
+print(
+    f"\nImages selected             : "
+    f"{len(selected)}"
+)
+
+print(
+    f"Transverse instances        : "
+    f"{sum(x['instances'] for x in selected)}"
+)
+
+print("\nFilenames remain UNCHANGED.")
+
+
+# ============================================================
+# SHOW SAMPLE
+# ============================================================
+
+print("\nSample selected files:\n")
+
+for item in selected[:20]:
+
+    print(
+        f"{item['country']:15} | "
+        f"{item['image'].name:25} | "
+        f"{item['instances']} transverse"
+    )
+
+
+# ============================================================
+# DRY RUN
+# ============================================================
+
+if DRY_RUN:
+
+    print("\n" + "=" * 70)
+    print("DRY RUN = TRUE")
+    print("=" * 70)
+
+    print(
+        "\nNothing has been copied."
+    )
+
+    print(
+        "\nIf this looks correct, change:"
+    )
+
+    print(
+        "    DRY_RUN = True"
+    )
+
+    print(
+        "to:"
+    )
+
+    print(
+        "    DRY_RUN = False"
+    )
+
+    raise SystemExit
+
+
+# ============================================================
+# COPY WITHOUT RENAMING
+# ============================================================
+
+print("\n" + "=" * 70)
+print("COPYING")
+print("=" * 70)
+
+copied_records = []
+
+for index, item in enumerate(
+    selected,
+    start=1
+):
+
+    image_destination = (
+        TRAIN_IMAGES /
+        item["image"].name
+    )
+
+    label_destination = (
+        TRAIN_LABELS /
+        item["label"].name
+    )
+
+    # Final safety check
+    if image_destination.exists():
+        print(
+            f"[SKIP] Image already exists: "
+            f"{item['image'].name}"
+        )
+        continue
+
+    if label_destination.exists():
+        print(
+            f"[SKIP] Label already exists: "
+            f"{item['label'].name}"
+        )
+        continue
+
+    # Copy using ORIGINAL filenames
+    shutil.copy2(
+        item["image"],
+        image_destination
+    )
+
+    shutil.copy2(
+        item["label"],
+        label_destination
+    )
+
+    copied_records.append({
+        "country": item["country"],
+        "original_image": item["image"].name,
+        "selected_image": item["image"].name,
+        "transverse_instances":
+            item["instances"],
+    })
+
+    if index % 100 == 0:
+        print(
+            f"Copied {index}/{len(selected)}"
+        )
+
+
+# ============================================================
+# UPDATE CSV
+# ============================================================
+
+print("\nUpdating CSV...")
+
+MANIFEST.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+fieldnames = [
+    "country",
+    "original_image",
+    "selected_image",
+    "transverse_instances",
+]
+
+manifest_exists = MANIFEST.exists()
+
+with open(
+    MANIFEST,
+    "a",
+    encoding="utf-8",
+    newline=""
+) as f:
+
+    writer = csv.DictWriter(
+        f,
+        fieldnames=fieldnames
+    )
+
+    if not manifest_exists:
+        writer.writeheader()
+
+    writer.writerows(
+        copied_records
+    )
+
+
+# ============================================================
+# COMPLETE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("COMPLETE")
+print("=" * 70)
+
+print(
+    f"\nNew images copied: "
+    f"{len(copied_records)}"
+)
+
+print(
+    f"New transverse instances: "
+    f"{sum(x['transverse_instances'] for x in selected)}"
+)
+
+print(
+    "\nOriginal filenames were preserved."
+)
+
+print(
+    "Original RDD2022 was not modified."
+)
+
+print(
+    "\nCSV has been updated."
+)
+
+print("=" * 70)
